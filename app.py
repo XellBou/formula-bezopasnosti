@@ -572,13 +572,14 @@ def render_norms() -> None:
 def render_about_college() -> None:
     st.header("🏛️ О колледже")
     
-    # Функция для кодирования картинок в Base64
+    # Функция для кодирования картинок в Base64 с кэшированием
+    @st.cache_data(show_spinner=False)
     def get_base64_image(image_path):
         try:
             with open(image_path, "rb") as img_file:
                 return "data:image/jpeg;base64," + base64.b64encode(img_file.read()).decode()
         except FileNotFoundError:
-            return "" # Если файл не найден, вернет пустоту (будет битая иконка)
+            return ""
 
     # Загружаем 4 фотографии (убедись, что пути правильные!)
     img1 = get_base64_image("assets/college_photos/1.jpg")
@@ -669,7 +670,8 @@ def render_about_college() -> None:
     st.subheader("🎓 Специальности")
     st.markdown("Колледж готовит специалистов по следующим направлениям:")
     
-    # Функция для конвертации картинок в Base64 (чтобы не было проблем с путями)
+    # Функция для конвертации картинок в Base64 с кэшированием
+    @st.cache_data(show_spinner=False)
     def get_spec_img(image_name):
         path = f"assets/college_photos/specialties/{image_name}"
         try:
