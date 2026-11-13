@@ -1,9 +1,11 @@
-"""Модуль 10. Ролевой симулятор спасателя (Hardcore mode)."""
+"""Модуль 10. Ролевой симулятор спасателя (Hardcore mode с защитой от сбоев)."""
 import streamlit as st
 import os
 import random
 import json
+import re
 
+# Загружаем переменные окружения для локальной разработки
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -13,22 +15,44 @@ except ImportError:
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
-# Безопасное получение ключа
+# Безопасное получение ключа (сначала из Streamlit Secrets, потом из .env)
 try:
     GIGA_CREDENTIALS = st.secrets["GIGACHAT_CREDENTIALS"]
 except Exception:
     GIGA_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 
+
+def extract_json(text):
+    """
+    Утилита для надежного извлечения JSON из ответа нейросети.
+    GigaChat иногда добавляет текст до или после фигурных скобок.
+    """
+    try:
+        # Регулярное выражение ищет все от первой { до последней }
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except Exception:
+        pass
+    return None
+
+
 def generate_scenario():
-    """Генерирует случайную вводную с жесткими скрытыми угрозами."""
+    """
+    Генерирует случайный сценарий ЧС через GigaChat.
+    Включает в себя жесткие правила, чтобы ИИ не придумывал фантастику.
+    """
     prompt = """
-    Ты — генератор сценариев для игры "Симулятор спасателя" в режиме Хардкор.
-    Придумай ситуацию (пожар, ДТП, обрушение, химическая авария, спасение на воде).
-    ВАЖНО: Придумай СКРЫТУЮ УГРОЗУ, которую игрок не увидит сразу. (например: газовый баллон, обрыв провода под водой, взрывчатка, больной COVID, запертая решетка на окне).
+    Ты — генератор сценариев для тренажера спасателей МЧС. 
+    Придумай РЕАЛИСТИЧНУЮ ситуацию (пожар, ДТП, обрушение, утечка газа).
+    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО придумывать фантастику, бомбы с таймерами, хакеров и прочий боевик.
     
-    Верни ответ СТРОГО в формате JSON без markdown:
+    Опиши обстановку, прибытие подразделения и начальные условия. 
+    Обязательно добавь СКРЫТУЮ УГРОЗУ (например: газовый баллон на балконе, обрыв провода под водой, запертая решетка на окне).
+    
+    Верни ответ СТРОГО в формате JSON без каких-либо других слов и форматирования (без ```json):
     {
-        "scenario_name": "Короткое название (например: Пожар в подвале)",
+        "scenario_name": "Короткое название (например: Пожар в подвале склада)",
         "situation": "Текст вводной для игрока (2-3 предложения)."
     }
     """
@@ -42,46 +66,48 @@ def generate_scenario():
         ) as giga:
             messages = [Messages(role=MessagesRole.USER, content=prompt)]
             response_data = giga.chat(Chat(messages=messages, model="GigaChat-3-Ultra"))
-            raw_text = response_data.choices[0].message.content.strip()
+            raw_text = response_data.choices[0].message.content
             
-            if raw_text.startswith("```json"):
-                raw_text = raw_text[7:-3]
-            elif raw_text.startswith("```"):
-                raw_text = raw_text[3:-3]
-                
-            data = json.loads(raw_text.strip())
-            return data["scenario_name"], data["situation"]
+            # Пытаемся вытащить JSON
+            data = extract_json(raw_text)
+            if data and "scenario_name" in data and "situation" in data:
+                return data["scenario_name"], data["situation"]
     except Exception:
-        return "Пожар в высотном здании", "Горит 5-й этаж. Из окон валит дым. Внутри могут быть люди. На балконе замечен газовый баллон."
+        # Если ИИ упал, выдаем резервный сценарий, чтобы игра не сломалась
+        pass
+        
+    return "Пожар в жилом доме", "Горит квартира на 5-м этаже. Из окон валит дым. На балконе замечен газовый баллон."
+
 
 def init_game():
-    """Инициализирует новую игру."""
+    """
+    Инициализирует новую игру.
+    Если у игрока 0 жизней или игра запущена впервые — создает сценарий.
+    """
+    # Если жизней нет, ставим 1 (в этом режиме у нас 1 жизнь, ошибка = смерть)
     if "sim_health" not in st.session_state:
-        st.session_state.sim_health = 1 # Всего 1 ошибка - и конец игры
+        st.session_state.sim_health = 1 
     
     if "sim_messages" not in st.session_state or st.session_state.sim_health <= 0:
-        scenario_name, situation = "Инициализация...", "Загрузка..."
-        
-        if GIGA_CREDENTIALS:
-            with st.spinner("Генерация нового вызова..."):
-                scenario_name, situation = generate_scenario()
-        else:
-            scenario_name, situation = "Тестовый вызов", "Тестовый сценарий (ключ GigaChat не найден)."
+        # Генерируем новый сценарий
+        scenario_name, situation = generate_scenario()
             
         st.session_state.sim_scenario = scenario_name
         st.session_state.sim_health = 1
         
+        # Жесткий системный промпт
         system_prompt = f"""
         Ты — ведущий текстового симулятора спасателя в режиме ХАРДКОР. Сценарий: {scenario_name}.
         {situation}
         
         ПРАВИЛА ИГРЫ:
         1. Игрок — командир отделения. Он пишет свои действия.
-        2. Ты строгий, придирчивый. Ты наказываешь за нарушение техники безопасности.
+        2. Ты строгий, придирчивый начальник караула. Ты наказываешь за нарушение техники безопасности.
         3. Если игрок вбегает в очаг БЕЗ СИЗОД, не отключает электричество перед тушением, не выставляет пост безопасности, не проверяет скрытые угрозы (газовый баллон, взрывчатка, решетки) — напиши в начале ответа тег **[ОШИБКА]**, опиши, как он пострадал, и напиши, что игра окончена.
         4. Если игрок выполняет ВСЕ действия по уставу (проверка СИЗОД, разведка, пост безопасности) — напиши **[УСПЕХ]**.
         5. Если игрок задает правильный вопрос (например, "есть ли в здании газовые баллоны?" или "отключено ли электричество?") — раскрой ему скрытую угрозу и дай шанс ее устранить.
         6. Будь краток (2-3 предложения). Всегда спрашивай: "Что делаете дальше?".
+        7. ЗАПРЕЩЕНО помогать игроку, если он тупит. Не давай подсказок.
         """
         
         st.session_state.sim_messages = [
@@ -89,8 +115,11 @@ def init_game():
             {"role": "assistant", "content": f"🚨 **Вызов: {scenario_name}**\n\n{situation}\n\n**Ваши первые действия, командир?**"}
         ]
 
+
 def evaluate_game():
-    """ИИ выставляет оценку."""
+    """
+    ИИ анализирует весь диалог и выставляет оценку.
+    """
     eval_prompt = """
     Ты — начальник караула. Оцени действия курсанта по 5-балльной шкале.
     Если он потерпел поражение (получил ошибку) — ставь 2. 
@@ -113,11 +142,14 @@ def evaluate_game():
             ]
             response_data = giga.chat(Chat(messages=messages, model="GigaChat-3-Ultra"))
             return response_data.choices[0].message.content
-    except Exception as e:
-        return f"Ошибка оценки: {e}"
+    except Exception:
+        return "⚠️ Ошибка связи с сервером оценки."
+
 
 def send_action(action_text):
-    """Отправляет действие в ИИ и обновляет жизни."""
+    """
+    Отправляет действие игрока в ИИ и обновляет статус игры.
+    """
     st.session_state.sim_messages.append({"role": "user", "content": action_text})
     
     try:
@@ -128,6 +160,7 @@ def send_action(action_text):
             scope="GIGACHAT_API_PERS",
             verify_ssl_certs=False
         ) as giga:
+            # Формируем историю
             giga_messages = []
             for m in st.session_state.sim_messages:
                 role = MessagesRole.SYSTEM if m["role"] == "system" else MessagesRole.USER if m["role"] == "user" else MessagesRole.ASSISTANT
@@ -137,17 +170,19 @@ def send_action(action_text):
             response_data = giga.chat(payload)
             response = response_data.choices[0].message.content
             
-            # Если ИИ нашел смертельную ошибку - конец игры
-            if "[ОШИБКА]" in response:
+            # Проверка на ошибку (регистронезависимая)
+            if "[ошибка]" in response.lower():
                 st.session_state.sim_health = 0
                 eval_result = evaluate_game()
                 st.session_state.sim_evaluation = eval_result
                 
             st.session_state.sim_messages.append({"role": "assistant", "content": response})
-    except Exception as e:
-        st.session_state.sim_messages.append({"role": "assistant", "content": f"Ошибка связи: {e}"})
+    except Exception:
+        st.session_state.sim_messages.append({"role": "assistant", "content": "⚠️ Связь с командиром прервалась из-за помех. Попробуйте еще раз."})
+
 
 def render() -> None:
+    """Отрисовка интерфейса симулятора."""
     st.header("🎮 Симулятор спасателя (Hardcore)")
     st.markdown(
         "Управляйте отделением. В этом режиме **у вас есть только ОДНА жизнь**. "
